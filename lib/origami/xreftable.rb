@@ -26,7 +26,7 @@ module Origami
         #
         def remove_xrefs
             @revisions.reverse_each do |rev|
-                if rev.has_xrefstm?
+                if rev.xrefstm?
                     delete_object(rev.xrefstm.reference)
                 end
 
@@ -68,13 +68,15 @@ module Origami
         end
 
         def self.parse(stream) #:nodoc:
-            if stream.scan(@@regexp).nil?
+            scanner = Parser.init_scanner(stream)
+
+            if scanner.scan(@@regexp).nil?
                 raise InvalidXRefError, "Invalid XRef format"
             end
 
-            offset = stream['offset'].to_i
-            generation = stream['gen'].to_i
-            state = stream['state']
+            offset = scanner['offset'].to_i
+            generation = scanner['gen'].to_i
+            state = scanner['state']
 
             XRef.new(offset, generation, state)
         end
@@ -94,13 +96,20 @@ module Origami
         end
 
         #
+        # Marks an XRef as freed.
+        #
+        def free!
+            @state = FREE
+        end
+
+        #
         # Outputs self into PDF code.
         #
-        def to_s
+        def to_s(eol: $/)
             off = @offset.to_s.rjust(10, '0')
             gen = @generation.to_s.rjust(5, '0')
 
-            "#{off} #{gen} #{@state}" + EOL
+            "#{off} #{gen} #{@state}" + eol.rjust(2, ' ')
         end
 
         def to_xrefstm_data(type_w, field1_w, field2_w)
@@ -141,16 +150,18 @@ module Origami
             end
 
             def self.parse(stream) #:nodoc:
-                if stream.scan(@@regexp).nil?
-                  raise InvalidXRefSubsectionError, "Bad subsection format"
+                scanner = Parser.init_scanner(stream)
+
+                if scanner.scan(@@regexp).nil?
+                    raise InvalidXRefSubsectionError, "Bad subsection format"
                 end
 
-                start = stream['start'].to_i
-                size = stream['size'].to_i
+                start = scanner['start'].to_i
+                size = scanner['size'].to_i
 
                 xrefs = []
                 size.times do
-                  xrefs << XRef.parse(stream)
+                    xrefs << XRef.parse(scanner)
                 end
 
                 XRef::Subsection.new(start, xrefs)
@@ -201,10 +212,10 @@ module Origami
             #
             # Outputs self into PDF code.
             #
-            def to_s
-                section = "#{@range.begin} #{@range.end - @range.begin + 1}" + EOL
+            def to_s(eol: $/)
+                section = "#{@range.begin} #{@range.end - @range.begin + 1}" + eol
                 @entries.each do |xref|
-                    section << xref.to_s
+                    section << xref.to_s(eol: eol)
                 end
 
                 section
@@ -216,7 +227,7 @@ module Origami
 
         #
         # Class representing a Cross-reference table.
-        # A section contains a set of XRefSubsection.
+        # A section contains a set of XRef::Subsection.
         #
         class Section
             include Enumerable
@@ -235,13 +246,15 @@ module Origami
             end
 
             def self.parse(stream) #:nodoc:
-                if stream.skip(@@regexp_open).nil?
+                scanner = Parser.init_scanner(stream)
+
+                if scanner.skip(@@regexp_open).nil?
                     raise InvalidXRefSectionError, "No xref token found"
                 end
 
                 subsections = []
-                while stream.match?(@@regexp_sub) do
-                    subsections << XRef::Subsection.parse(stream)
+                while scanner.match?(@@regexp_sub) do
+                    subsections << XRef::Subsection.parse(scanner)
                 end
 
                 XRef::Section.new(subsections)
@@ -321,8 +334,8 @@ module Origami
             #
             # Outputs self into PDF code.
             #
-            def to_s
-                "xref" << EOL << @subsections.join
+            def to_s(eol: $/)
+                "xref" << eol << @subsections.map{|sub| sub.to_s(eol: eol)}.join
             end
         end
     end

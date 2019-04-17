@@ -29,8 +29,9 @@ module Origami
     # Class representing a Name Object.
     # Name objects are strings which identify some PDF file inner structures.
     #
-    class Name #< DelegateClass(Symbol)
+    class Name
         include Origami::Object
+        include Comparable
 
         TOKENS = %w{ / } #:nodoc:
 
@@ -73,18 +74,19 @@ module Origami
             @value.hash
         end
 
-        def to_s #:nodoc:
-            super(TOKENS.first + Name.expand(@value))
+        def to_s(eol: $/) #:nodoc:
+            super(TOKENS.first + Name.expand(@value), eol: eol)
         end
 
         def self.parse(stream, _parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
             name =
-                if stream.scan(@@regexp).nil?
+                if scanner.scan(@@regexp).nil?
                     raise InvalidNameObjectError, "Bad name format"
                 else
-                    value = stream['name']
+                    value = scanner['name']
 
                     Name.new(value.include?('#') ? contract(value) : value)
                 end
@@ -102,7 +104,7 @@ module Origami
                 if name[i] == "#"
                     digits = name[i+1, 2]
 
-                    unless /^[A-Za-z0-9]{2}$/ === digits
+                    unless digits =~ /^[A-Za-z0-9]{2}$/
                         raise InvalidNameObjectError, "Irregular use of # token"
                     end
 

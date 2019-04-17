@@ -66,14 +66,16 @@ module Origami
             end
 
             def self.parse(stream) #:nodoc:
-                if not stream.scan(MAGIC).nil?
-                    maj = stream['major'].to_i
-                    min = stream['minor'].to_i
+                scanner = Parser.init_scanner(stream)
+
+                if not scanner.scan(MAGIC).nil?
+                    maj = scanner['major'].to_i
+                    min = scanner['minor'].to_i
                 else
                     raise InvalidHeader, "Invalid header format"
                 end
 
-                stream.skip(REGEXP_WHITESPACES)
+                scanner.skip(REGEXP_WHITESPACES)
 
                 PPKLite::Header.new(maj, min)
             end
@@ -81,8 +83,8 @@ module Origami
             #
             # Outputs self into PDF code.
             #
-            def to_s
-                "%PPKLITE-#{@major_version}.#{@minor_version}".b + EOL
+            def to_s(eol: $/)
+                "%PPKLITE-#{@major_version}.#{@minor_version}".b + eol
             end
 
             def to_sym #:nodoc:
@@ -134,7 +136,7 @@ module Origami
             include StandardObject
             include Descriptor
 
-            add_type_signature :ABEType, Descriptor::CERTIFICATE
+            add_type_signature :ABEType => Descriptor::CERTIFICATE
 
             module Flags
                 CAN_CERTIFY             = 1 << 1
@@ -160,7 +162,7 @@ module Origami
             include StandardObject
             include Descriptor
 
-            add_type_signature :ABEType, Descriptor::USER
+            add_type_signature :ABEType => Descriptor::USER
 
             field   :ABEType,       :Type => Integer, :Default => Descriptor::USER, :Required => true
             field   :Name,          :Type => String, :Required => true

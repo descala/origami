@@ -1,5 +1,14 @@
 # encoding: UTF-8
 
+# Optionally install bundler tasks if present.
+begin
+    require 'bundler'
+
+    Bundler.setup
+    Bundler::GemHelper.install_tasks
+rescue LoadError
+end
+
 require 'rdoc/task'
 require 'rake/testtask'
 require 'rake/clean'
@@ -24,3 +33,5 @@ end
 task :clean do
     Rake::Cleaner.cleanup_files Dir['*.gem', 'doc', 'examples/**/*.pdf']
 end
+
+task :default => :test

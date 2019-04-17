@@ -31,15 +31,7 @@ module Origami
         def append_page(page = Page.new)
             init_page_tree
 
-            treeroot = self.Catalog.Pages
-
-            treeroot.Kids ||= [] #:nodoc:
-            treeroot.Kids.push(page)
-            treeroot.Count ||= 0
-            treeroot.Count += 1
-
-            page.Parent = treeroot
-
+            self.Catalog.Pages.append_page(page)
             yield(page) if block_given?
 
             self
@@ -47,7 +39,7 @@ module Origami
 
         #
         # Inserts a page at position _index_ into the document.
-        # _index_:: Page index (starting from zero).
+        # _index_:: Page index (starting from one).
         # _page_:: The page to insert into the document. Creates a new one if none given.
         #
         # Pass the Page object if a block is present.
@@ -286,11 +278,9 @@ module Origami
         field   :Count,         :Type => Integer, :Default => 0, :Required => true
 
         def initialize(hash = {}, parser = nil)
-            self.Count = 0
-            self.Kids = []
-
             super
 
+            set_default_values # Ensure that basic tree fields are present.
             set_indirect(true)
         end
 
@@ -300,44 +290,46 @@ module Origami
             super
         end
 
-        def insert_page(index, page)
-            raise IndexError, "Invalid index for page tree" if index > self.Count
+        #
+        # Inserts a page into the node at a specified position (starting from 1).
+        #
+        def insert_page(n, page)
+            raise IndexError, "Page numbers are referenced starting from 1" if n < 1
+
+            kids = self.Kids
+            unless kids.is_a?(Array)
+                raise InvalidPageTreeError, "Kids must be an Array"
+            end
 
             count = 0
-            kids = self.Kids
+            kids.each_with_index do |kid, index|
+                node = kid.solve
 
-            kids.length.times do |n|
-                if count == index
-                    kids.insert(n, page)
-                    self.Count = self.Count + 1
-                    page.Parent = self
-                    return self
-                else
-                    node = kids[n].solve
-                    case node
-                    when Page
-                        count = count + 1
-                        next
-                    when PageTreeNode
-                        if count + node.Count > index
-                            node.insert_page(index - count, page)
-                            self.Count = self.Count + 1
-                            return self
-                        else
-                            count = count + node.Count
-                            next
-                        end
+                case node
+                when Page
+                    count = count + 1
+                    if count == n
+                        kids.insert(index, page)
+                        page.Parent = self
+                        self.Count += 1
+                        return self
                     end
+
+                when PageTreeNode
+                    count = count + node.Count
+                    if count >= n
+                        node.insert_page(n - count + node.Count, page)
+                        self.Count += 1
+                        return self
+                    end
+                else
+                    raise InvalidPageTreeError, "not a Page or PageTreeNode"
                 end
             end
 
-            if count == index
-                self << page
-            else
-                raise IndexError, "An error occured while inserting page"
-            end
+            raise IndexError, "Out of order page index" unless count + 1 == n
 
-            self
+            self.append_page(page)
         end
 
         #
@@ -382,54 +374,37 @@ module Origami
         #
         # Get the n-th Page object in this node, starting from 1.
         #
-        def get_page(n, browsed_nodes: [])
+        def get_page(n)
             raise IndexError, "Page numbers are referenced starting from 1" if n < 1
+            raise IndexError, "Page not found" if n > self.Count.to_i
 
-            if browsed_nodes.any?{|node| node.equal?(self)}
-                raise InvalidPageTreeError, "Cyclic tree graph detected"
-            end
-
-            unless self.Kids.is_a?(Array)
-                raise InvalidPageTreeError, "Kids must be an Array"
-            end
-
-            decount = n
-            [ self.Count.value, self.Kids.length ].min.times do |i|
-                node = self.Kids[i].solve
-
-                case node
-                when Page
-                    decount = decount - 1
-                    return node if decount == 0
-
-                when PageTreeNode
-                    nchilds = [ node.Count.value, node.Kids.length ].min
-                    if nchilds >= decount
-                        return node.get_page(decount, browsed_nodes: browsed_nodes)
-                    else
-                        decount -= nchilds
-                    end
-                else
-                    raise InvalidPageTreeError, "not a Page or PageTreeNode"
-                end
-            end
-
-            raise IndexError, "Page not found"
+            self.each_page.lazy.drop(n - 1).first or raise IndexError, "Page not found"
         end
 
-        def <<(pageset)
-            pageset = [pageset] unless pageset.is_a?(::Array)
-            unless pageset.all? {|item| item.is_a?(Page) or item.is_a?(PageTreeNode) }
-                raise TypeError, "Cannot add anything but Page and PageTreeNode to this node"
-            end
+        #
+        # Removes all pages in the node.
+        #
+        def clear_pages
+            self.Count = 0
+            self.Kids = []
+        end
 
-            self.Kids ||= Array.new
-            self.Kids.concat(pageset)
-            self.Count = self.Kids.length
+        #
+        # Returns true unless the node is empty.
+        #
+        def pages?
+            self.each_page.size > 0
+        end
 
-            pageset.each do |node|
-                node.Parent = self
-            end
+        #
+        # Append a page at the end of this node.
+        #
+        def append_page(page)
+            self.Kids ||= []
+            self.Kids.push(page)
+            self.Count += 1
+
+            page.Parent = self
         end
     end
 
@@ -611,10 +586,6 @@ module Origami
         # Add an Annotation to the Page.
         #
         def add_annotation(*annotations)
-            unless annotations.all?{|annot| annot.is_a?(Annotation) or annot.is_a?(Reference)}
-                raise TypeError, "Only Annotation objects must be passed."
-            end
-
             self.Annots ||= []
 
             annotations.each do |annot|
@@ -671,10 +642,6 @@ module Origami
         # Will execute an action when the page is opened.
         #
         def onOpen(action)
-            unless action.is_a?(Action) or action.is_a?(Reference)
-                raise TypeError, "An Action object must be passed."
-            end
-
             self.AA ||= Page::AdditionalActions.new
             self.AA.O = action
 
@@ -685,10 +652,6 @@ module Origami
         # Will execute an action when the page is closed.
         #
         def onClose(action)
-            unless action.is_a?(Action) or action.is_a?(Reference)
-                raise TypeError, "An Action object must be passed."
-            end
-
             self.AA ||= Page::AdditionalActions.new
             self.AA.C = action
 
@@ -699,10 +662,6 @@ module Origami
         # Will execute an action when navigating forward from this page.
         #
         def onNavigateForward(action) #:nodoc:
-            unless action.is_a?(Action) or action.is_a?(Reference)
-                raise TypeError, "An Action object must be passed."
-            end
-
             self.PresSteps ||= NavigationNode.new
             self.PresSteps.NA = action
 
@@ -713,10 +672,6 @@ module Origami
         # Will execute an action when navigating backward from this page.
         #
         def onNavigateBackward(action) #:nodoc:
-            unless action.is_a?(Action) or action.is_a?(Reference)
-                raise TypeError, "An Action object must be passed."
-            end
-
             self.PresSteps ||= NavigationNode.new
             self.PresSteps.PA = action
 

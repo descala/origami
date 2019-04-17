@@ -29,6 +29,7 @@ module Origami
     #
     class Reference
         include Origami::Object
+        include Comparable
 
         TOKENS = [ "(?<no>\\d+)" + WHITESPACES +  "(?<gen>\\d+)" + WHITESPACES + "R" ] #:nodoc:
         REGEXP_TOKEN = Regexp.new(TOKENS.first, Regexp::MULTILINE)
@@ -43,14 +44,15 @@ module Origami
         end
 
         def self.parse(stream, _parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
-            if stream.scan(@@regexp).nil?
+            if scanner.scan(@@regexp).nil?
                 raise InvalidReferenceError, "Bad reference to indirect objet format"
             end
 
-            no = stream['no'].to_i
-            gen = stream['gen'].to_i
+            no = scanner['no'].to_i
+            gen = scanner['gen'].to_i
 
             ref = Reference.new(no, gen)
             ref.file_offset = offset
@@ -58,7 +60,12 @@ module Origami
             ref
         end
 
-        def solve
+        #
+        # Returns the object pointed to by the reference.
+        # The reference must be part of a document.
+        # Raises an InvalidReferenceError if the object cannot be found.
+        #
+        def follow
             doc = self.document
 
             if doc.nil?
@@ -72,6 +79,19 @@ module Origami
             end
 
             target or Null.new
+        end
+        alias solve follow
+
+        #
+        # Returns true if the reference points to an object.
+        #
+        def valid?
+            begin
+                self.solve
+                true
+            rescue InvalidReferenceError
+                false
+            end
         end
 
         def hash #:nodoc:
@@ -99,8 +119,8 @@ module Origami
             [@refno, @refgen]
         end
 
-        def to_s #:nodoc:
-            super("#{@refno} #{@refgen} R")
+        def to_s(eol: $/) #:nodoc:
+            super("#{@refno} #{@refgen} R", eol: eol)
         end
 
         #

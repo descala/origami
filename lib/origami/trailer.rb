@@ -52,11 +52,10 @@ module Origami
         end
 
         def trailer_key(attr) #:nodoc:
-
             @revisions.reverse_each do |rev|
-                if rev.trailer.dictionary? and not rev.trailer[attr].nil?
+                if rev.trailer.dictionary? and rev.trailer.key?(attr)
                     return rev.trailer[attr].solve
-                elsif rev.has_xrefstm?
+                elsif rev.xrefstm?
                     xrefstm = rev.xrefstm
                     if xrefstm.is_a?(XRefStream) and xrefstm.key?(attr)
                         return xrefstm[attr].solve
@@ -115,40 +114,60 @@ module Origami
         end
 
         def self.parse(stream, parser = nil) #:nodoc:
+            scanner = Parser.init_scanner(stream)
 
-            if stream.skip(@@regexp_open)
-                dictionary = Dictionary.parse(stream, parser)
+            if scanner.skip(@@regexp_open)
+                dictionary = Dictionary.parse(scanner, parser)
             else
                 dictionary = nil
             end
 
-            if not stream.scan(@@regexp_xref)
+            if not scanner.scan(@@regexp_xref)
                 raise InvalidTrailerError, "Cannot get startxref value"
             end
 
-            startxref = stream['startxref'].to_i
+            startxref = scanner['startxref'].to_i
 
-            if not stream.scan(@@regexp_close)
+            if not scanner.scan(@@regexp_close)
                 parser.warn("No %%EOF token found") if parser
             end
 
             Trailer.new(startxref, dictionary)
         end
 
+        #
+        # Returns true if the specified key is present in the Trailer dictionary.
+        #
+        def key?(key)
+            self.dictionary? and @dictionary.key?(key)
+        end
+
+        #
+        # Access a key in the trailer dictionary if present.
+        #
         def [](key)
             @dictionary[key] if dictionary?
         end
 
-        def []=(key,val)
+        #
+        # Sets a value in the trailer dictionary.
+        #
+        def []=(key, value)
             self.dictionary = Dictionary.new unless dictionary?
-            @dictionary[key] = val
+            @dictionary[key] = value
         end
 
+        #
+        # Sets the trailer dictionary.
+        #
         def dictionary=(dict)
             dict.parent = self if dict
             @dictionary = dict
         end
 
+        #
+        # Returns true if the Trailer contains a Dictionary.
+        #
         def dictionary?
             not @dictionary.nil?
         end
@@ -156,13 +175,13 @@ module Origami
         #
         # Outputs self into PDF code.
         #
-        def to_s
+        def to_s(indent: 1, eol: $/)
             content = ""
             if self.dictionary?
-                content << TOKENS.first << EOL << @dictionary.to_s << EOL
+                content << TOKENS.first << eol << @dictionary.to_s(indent: indent, eol: eol) << eol
             end
 
-            content << XREF_TOKEN << EOL << @startxref.to_s << EOL << TOKENS.last << EOL
+            content << XREF_TOKEN << eol << @startxref.to_s << eol << TOKENS.last << eol
 
             content
         end

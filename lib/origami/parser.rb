@@ -189,11 +189,11 @@ module Origami
         end
 
         def error(msg = "") #:nodoc:
-            log(VERBOSE_QUIET, 'error', :red, msg.red)
+            log(VERBOSE_QUIET, 'error', :red, msg)
         end
 
         def warn(msg = "") #:nodoc:
-            log(VERBOSE_INFO, 'warn ', :yellow, msg.yellow)
+            log(VERBOSE_INFO, 'warn ', :yellow, msg)
         end
 
         def info(msg = "") #:nodoc:
@@ -206,6 +206,16 @@ module Origami
 
         def trace(msg = "") #:nodoc:
             log(VERBOSE_TRACE, 'trace', :cyan, msg)
+        end
+
+        def self.init_scanner(stream)
+            if stream.is_a?(StringScanner)
+                stream
+            elsif stream.respond_to?(:to_str)
+                StringScanner.new(stream.to_str)
+            else
+                raise TypeError, "Cannot initialize scanner from #{stream.class}"
+            end
         end
 
         private

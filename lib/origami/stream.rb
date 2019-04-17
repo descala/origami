@@ -36,21 +36,19 @@ module Origami
         include Origami::Object
         include StandardObject
         include FieldAccessor
-        using TypeConversion
+        include Enumerable
+        extend TypeGuessing
 
         TOKENS = [ "stream" + WHITECHARS_NORET + "(\\r\\n|\\r|\\n)" , "endstream" ] #:nodoc:
 
         @@regexp_open = Regexp.new(WHITESPACES + TOKENS.first)
         @@regexp_close = Regexp.new(TOKENS.last)
 
-        @@type_signatures = {}
-        @@type_keys = []
-
         #
         # Actually only 5 first ones are implemented,
         # other ones are mainly about image data processing (JPEG, JPEG2000 ...)
         #
-        @@defined_filters = %i[
+        DEFINED_FILTERS = %i[
           ASCIIHexDecode
           ASCII85Decode
           LZWDecode
@@ -114,22 +112,23 @@ module Origami
         end
 
         def self.parse(stream, parser = nil) #:nodoc:
-            dictionary = Dictionary.parse(stream, parser)
-            return dictionary if not stream.skip(@@regexp_open)
+            scanner = Parser.init_scanner(stream)
+            dictionary = Dictionary.parse(scanner, parser)
+            return dictionary if not scanner.skip(@@regexp_open)
 
             length = dictionary[:Length]
             if not length.is_a?(Integer)
-                raw_data = stream.scan_until(@@regexp_close)
+                raw_data = scanner.scan_until(@@regexp_close)
                 if raw_data.nil?
                     raise InvalidStreamObjectError,
                             "Stream shall end with a 'endstream' statement"
                 end
             else
                 length = length.value
-                raw_data = stream.peek(length)
-                stream.pos += length
+                raw_data = scanner.peek(length)
+                scanner.pos += length
 
-                if not ( unmatched = stream.scan_until(@@regexp_close) )
+                if not ( unmatched = scanner.scan_until(@@regexp_close) )
                     raise InvalidStreamObjectError,
                         "Stream shall end with a 'endstream' statement"
                 end
@@ -159,32 +158,6 @@ module Origami
             stm.file_offset = dictionary.file_offset
 
             stm
-        end
-
-        def self.add_type_signature(key, value) #:nodoc:
-            key, value = key.to_o, value.to_o
-
-            # Inherit the superclass type information.
-            if not @@type_signatures.key?(self) and @@type_signatures.key?(self.superclass)
-                @@type_signatures[self] = @@type_signatures[self.superclass].dup
-            end
-
-            @@type_signatures[self] ||= {}
-            @@type_signatures[self][key] = value
-
-            @@type_keys.push(key) unless @@type_keys.include?(key)
-        end
-
-        def self.guess_type(hash) #:nodoc:
-            best_type = self
-
-            @@type_signatures.each_pair do |klass, keys|
-                next unless klass < best_type
-
-                best_type = klass if keys.all? { |k,v| hash[k] == v }
-            end
-
-            best_type
         end
 
         #
@@ -244,16 +217,13 @@ module Origami
         end
 
         def cast_to(type, _parser = nil)
-            super(type)
+            assert_cast_type(type)
 
             cast = type.new("", self.dictionary.copy)
             cast.encoded_data = self.encoded_data.dup
-            cast.no, cast.generation = self.no, self.generation
-            cast.set_indirect(true)
-            cast.set_document(self.document)
             cast.file_offset = self.file_offset
 
-            cast
+            transfer_attributes(cast)
         end
 
         def value #:nodoc:
@@ -306,16 +276,6 @@ module Origami
             return if decoded?
 
             filters = self.filters
-
-            if filters.empty?
-                @data = @encoded_data.dup
-                return
-            end
-
-            unless filters.all?{|filter| filter.is_a?(Name)}
-                raise InvalidStreamObjectError, "Invalid Filter type parameter"
-            end
-
             dparams = decode_params
 
             @data = @encoded_data.dup
@@ -335,7 +295,7 @@ module Origami
                 begin
                     @data = decode_data(@data, filter, params)
                 rescue Filter::Error => error
-                    @data = error.decoded_data if error.decoded_data
+                    @data = error.decoded_data
                     raise
                 end
             end
@@ -348,17 +308,8 @@ module Origami
         #
         def encode!
             return if encoded?
+
             filters = self.filters
-
-            if filters.empty?
-                @encoded_data = @data.dup
-                return
-            end
-
-            unless filters.all?{|filter| filter.is_a?(Name)}
-                raise InvalidStreamObjectError, "Invalid Filter type parameter"
-            end
-
             dparams = decode_params
 
             @encoded_data = @data.dup
@@ -382,22 +333,22 @@ module Origami
             self
         end
 
-        def to_s(indent: 1, tab: "\t") #:nodoc:
+        def to_s(indent: 1, tab: "\t", eol: $/) #:nodoc:
             content = ""
 
             content << @dictionary.to_s(indent: indent, tab: tab)
-            content << "stream" + EOL
+            content << "stream" + eol
             content << self.encoded_data
-            content << EOL << TOKENS.last
+            content << eol << TOKENS.last
 
-            super(content)
+            super(content, eol: eol)
         end
 
         def [](key) #:nodoc:
             @dictionary[key]
         end
 
-        def []=(key,val) #:nodoc:
+        def []=(key, val) #:nodoc:
             @dictionary[key] = val
         end
 
@@ -405,10 +356,19 @@ module Origami
             @dictionary.each_key(&b)
         end
 
+        def each_pair(&b) #:nodoc
+            @dictionary.each_pair(&b)
+        end
+        alias each each_pair
+
         def key?(name)
             @dictionary.key?(name)
         end
         alias has_key? key?
+
+        def keys
+            @dictionary.keys
+        end
 
         private
 
@@ -464,25 +424,31 @@ module Origami
         end
 
         def decode_data(data, filter, params) #:nodoc:
-            unless @@defined_filters.include?(filter.value)
-                raise InvalidStreamObjectError, "Unknown filter : #{filter}"
-            end
-
-            Origami::Filter.const_get(filter.value.to_s.sub(/Decode$/,"")).decode(data, params)
+            filter_module(filter).decode(data, params)
         end
 
         def encode_data(data, filter, params) #:nodoc:
-            unless @@defined_filters.include?(filter.value)
-                raise InvalidStreamObjectError, "Unknown filter : #{filter}"
-            end
+            mod = filter_module(filter)
 
-            encoded = Origami::Filter.const_get(filter.value.to_s.sub(/Decode$/,"")).encode(data, params)
+            encoded = mod.encode(data, params)
 
-            if filter.value == :ASCIIHexDecode or filter.value == :ASCII85Decode
-                encoded << Origami::Filter.const_get(filter.value.to_s.sub(/Decode$/,""))::EOD
+            if %i[ASCIIHexDecode ASCII85Decode AHx A85].include?(filter.value)
+                encoded << mod::EOD
             end
 
             encoded
+        end
+
+        def filter_module(name)
+            unless name.is_a?(Name)
+                raise InvalidObjectStreamObjectError, "Filter has invalid type #{name.type}"
+            end
+
+            unless DEFINED_FILTERS.include?(name.value)
+                raise InvalidStreamObjectError, "Invalid filter : #{name}"
+            end
+
+            Filter.const_get(name.value.to_s.sub(/Decode$/, ""))
         end
     end
 

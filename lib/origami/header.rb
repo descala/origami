@@ -43,33 +43,33 @@ module Origami
             end
 
             def self.parse(stream) #:nodoc:
-                unless stream.scan(MAGIC).nil?
-                    maj = stream['major'].to_i
-                    min = stream['minor'].to_i
+                scanner = Parser.init_scanner(stream)
+
+                unless scanner.scan(MAGIC).nil?
+                    maj = scanner['major'].to_i
+                    min = scanner['minor'].to_i
                 else
-                    raise InvalidHeaderError, "Invalid header format : #{stream.peek(15).inspect}"
+                    raise InvalidHeaderError, "Invalid header format : #{scanner.peek(15).inspect}"
                 end
 
-                stream.skip(REGEXP_WHITESPACES)
+                scanner.skip(REGEXP_WHITESPACES)
 
                 PDF::Header.new(maj, min)
             end
 
             #
+            # Returns the Header version as a String.
+            #
+            def version
+                "#{@major_version}.#{@minor_version}"
+            end
+
+            #
             # Outputs self into PDF code.
             #
-            def to_s
-                "%PDF-#{@major_version}.#{@minor_version}".b + EOL
-            end
-
-            def to_sym #:nodoc:
-                "#{@major_version}.#{@minor_version}".to_sym
-            end
-
-            def to_f #:nodoc:
-                to_sym.to_s.to_f
+            def to_s(eol: $/)
+                "%PDF-#{self.version}".b + eol
             end
         end
     end
-
 end

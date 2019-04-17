@@ -18,13 +18,18 @@
 
 =end
 
+require 'set'
+
 #
 # Module for parsing/generating PDF files.
 #
 module Origami
 
+    #
+    # Provides refinements for standard Ruby types.
+    # Allows to convert native types to their associated Origami::Object types using method #to_o.
+    #
     module TypeConversion
-
         refine ::Integer do
             def to_o
                 Origami::Integer.new(self)
@@ -80,10 +85,51 @@ module Origami
         end
     end
 
-    #
-    # Common Exception class for Origami errors.
-    #
-    class Error < StandardError
+    module TypeGuessing
+        using TypeConversion
+
+        def guess_type(hash)
+            return self if (@@type_keys & hash.keys).empty?
+            best_match = self
+
+            @@signatures.each_pair do |klass, keys|
+                next unless klass < best_match
+
+                best_match = klass if keys.all? {|k,v| v.is_a?(Set) ? v.include?(hash[k]) : hash[k] == v }
+            end
+
+            best_match
+        end
+
+        private
+
+        def add_type_signature(**key_vals)
+            @@signatures ||= {}
+            @@type_keys ||= Set.new
+
+            # Inherit the superclass type information.
+            if not @@signatures.key?(self) and @@signatures.key?(self.superclass)
+                @@signatures[self] = @@signatures[self.superclass].dup
+            end
+
+            @@signatures[self] ||= {}
+
+            key_vals.each_pair do |key, value|
+                key, value = key.to_o, value.to_o
+
+                if @@signatures[self].key?(key)
+                    if @@signatures[self][key].is_a?(Set)
+                        @@signatures[self][key].add(value)
+                    elsif @@signatures[self][key] != value
+                        @@signatures[self][key] = Set.new.add(@@signatures[self][key]).add(value)
+                    end
+                else
+                    @@signatures[self][key] = value
+                end
+
+                @@type_keys.add(key)
+            end
+        end
     end
 
     #
@@ -114,7 +160,6 @@ module Origami
     # Mixin' module for objects which can store their options into an inner Dictionary.
     #
     module StandardObject #:nodoc:
-
         DEFAULT_ATTRIBUTES = { :Type => Object, :Version => "1.2" } #:nodoc:
 
         def self.included(receiver) #:nodoc:
@@ -123,6 +168,7 @@ module Origami
         end
 
         module ClassMethods #:nodoc:all
+            include TypeGuessing
 
             def inherited(subclass)
                 subclass.instance_variable_set(:@fields, Hash[@fields.map{|name, attributes| [name, attributes.clone]}])
@@ -136,11 +182,14 @@ module Origami
             # Define a new field with given attributes.
             #
             def field(name, attributes)
-                if attributes[:Required] == true and attributes.has_key?(:Default) and attributes[:Type] == Name
-                    self.add_type_signature(name, attributes[:Default])
+                if attributes[:Required] and attributes.key?(:Default) and attributes[:Type] == Name
+                    signature = {}
+                    signature[name] = attributes[:Default]
+
+                    add_type_signature(**signature)
                 end
 
-                if @fields.has_key?(name)
+                if @fields.key?(name)
                     @fields[name].merge! attributes
                 else
                     @fields[name] = attributes
@@ -165,9 +214,7 @@ module Origami
             # Returns the expected type for a field name.
             #
             def hint_type(name)
-                if @fields.has_key?(name)
-                    @fields[name][:Type]
-                end
+                @fields[name][:Type] if @fields.key?(name)
             end
 
             private
@@ -214,7 +261,7 @@ module Origami
         # Returns the version and level required by the current Object.
         #
         def version_required #:nodoc:
-            max = [ 1.0, 0 ]
+            max = [ "1.0", 0 ]
 
             self.each_key do |field|
                 attributes = self.class.fields[field.value]
@@ -223,14 +270,11 @@ module Origami
                     next
                 end
 
-                current_version = attributes.has_key?(:Version) ? attributes[:Version].to_f : 0
-                current_level = attributes[:ExtensionLevel] || 0
-                current = [ current_version, current_level ]
+                version = attributes[:Version] || '1.0'
+                level = attributes[:ExtensionLevel] || 0
+                current = [ version, level ]
 
-                max = current if (current <=> max) > 0
-
-                sub = self[field.value].version_required
-                max = sub if (sub <=> max) > 0
+                max = [ max, current, self[field.value].version_required ].max
             end
 
             max
@@ -289,7 +333,6 @@ module Origami
 
     WHITESPACES = "([ \\f\\t\\r\\n\\0]|%[^\\n\\r]*(\\r\\n|\\r|\\n))*" #:nodoc:
     WHITECHARS_NORET = "[ \\f\\t\\0]*" #:nodoc:
-    EOL = "\r\n" #:nodoc:
     WHITECHARS = "[ \\f\\t\\r\\n\\0]*" #:nodoc:
     REGEXP_WHITESPACES = Regexp.new(WHITESPACES) #:nodoc:
 
@@ -354,6 +397,7 @@ module Origami
             @no, @generation = 0, 0
             @document = nil
             @parent = nil
+            @file_offset = nil
 
             super(*cons) unless cons.empty?
         end
@@ -370,6 +414,7 @@ module Origami
             if bool == false
                 @no = @generation = 0
                 @document = nil
+                @file_offset = nil
             end
 
             @indirect = bool
@@ -393,17 +438,17 @@ module Origami
         end
 
         #
-        # Compare two objects from their respective numbers.
-        #
-        def <=>(obj)
-            [@no, @generation] <=> [obj.no, obj.generation]
-        end
-
-        #
         # Returns whether the objects is indirect, which means that it is not embedded into another object.
         #
         def indirect?
             @indirect
+        end
+
+        #
+        # Returns whether an object number exists for this object.
+        #
+        def numbered?
+            @no > 0
         end
 
         #
@@ -429,7 +474,19 @@ module Origami
         end
 
         #
-        # Returns an indirect reference to this object, or a Null object is this object is not indirect.
+        # Casts an object to a new type.
+        #
+        def cast_to(type, parser = nil)
+            assert_cast_type(type)
+
+            cast = type.new(self.copy, parser)
+            cast.file_offset = @file_offset
+
+            transfer_attributes(cast)
+        end
+
+        #
+        # Returns an indirect reference to this object.
         #
         def reference
             raise InvalidObjectError, "Cannot reference a direct object" unless self.indirect?
@@ -452,7 +509,7 @@ module Origami
                         case object
                         when Stream
                             object.dictionary.xref_cache[self.reference]
-                        when Dictionary, Array
+                        when ObjectCache
                             object.xref_cache[self.reference]
                         end
                      }
@@ -489,45 +546,7 @@ module Origami
         # Catalog and PageTreeNode objects are excluded to limit the recursion.
         #
         def logicalize! #:nodoc:
-
-            resolve_all_references = -> (obj, browsed = [], ref_cache = {}) do
-                return if browsed.include?(obj)
-                browsed.push(obj)
-
-                if obj.is_a?(ObjectStream)
-                    obj.each do |subobj|
-                        resolve_all_references[subobj, browsed, ref_cache]
-                    end
-                end
-
-                if obj.is_a?(Dictionary) or obj.is_a?(Array)
-                    obj.map! do |subobj|
-                        if subobj.is_a?(Reference)
-                            new_obj =
-                                if ref_cache.has_key?(subobj)
-                                    ref_cache[subobj]
-                                else
-                                    ref_cache[subobj] = subobj.solve.copy
-                                end
-                            new_obj.no = new_obj.generation = 0
-                            new_obj.parent = obj
-
-                            new_obj unless new_obj.is_a?(Catalog) or new_obj.is_a?(PageTreeNode)
-                        else
-                            subobj
-                        end
-                    end
-
-                    obj.each do |subobj|
-                        resolve_all_references[subobj, browsed, ref_cache]
-                    end
-
-                elsif obj.is_a?(Stream)
-                    resolve_all_references[obj.dictionary, browsed, ref_cache]
-                end
-            end
-
-            resolve_all_references[self]
+            resolve_all_references(self)
         end
 
         #
@@ -573,25 +592,26 @@ module Origami
 
         class << self
 
-            def typeof(stream, noref = false) #:nodoc:
-                stream.skip(REGEXP_WHITESPACES)
+            def typeof(stream) #:nodoc:
+                scanner = Parser.init_scanner(stream)
+                scanner.skip(REGEXP_WHITESPACES)
 
-                case stream.peek(1)
+                case scanner.peek(1)
                 when '/' then return Name
                 when '<'
-                    return (stream.peek(2) == '<<') ? Stream : HexaString
+                    return (scanner.peek(2) == '<<') ? Stream : HexaString
                 when '(' then return LiteralString
                 when '[' then return Origami::Array
                 when 'n' then
-                    return Null if stream.peek(4) == 'null'
+                    return Null if scanner.peek(4) == 'null'
                 when 't' then
-                    return Boolean if stream.peek(4) == 'true'
+                    return Boolean if scanner.peek(4) == 'true'
                 when 'f' then
-                    return Boolean if stream.peek(5) == 'false'
+                    return Boolean if scanner.peek(5) == 'false'
                 else
-                    if not noref and stream.check(Reference::REGEXP_TOKEN) then return Reference
-                    elsif stream.check(Real::REGEXP_TOKEN) then return Real
-                    elsif stream.check(Integer::REGEXP_TOKEN) then return Integer
+                    if scanner.check(Reference::REGEXP_TOKEN) then return Reference
+                    elsif scanner.check(Real::REGEXP_TOKEN) then return Real
+                    elsif scanner.check(Integer::REGEXP_TOKEN) then return Integer
                     else
                         nil
                     end
@@ -601,32 +621,30 @@ module Origami
             end
 
             def parse(stream, parser = nil) #:nodoc:
-                offset = stream.pos
+                scanner = Parser.init_scanner(stream)
+                offset = scanner.pos
 
                 #
                 # End of body ?
                 #
-                return nil if stream.match?(/xref/) or stream.match?(/trailer/) or stream.match?(/startxref/)
+                return nil if scanner.match?(/xref/) or scanner.match?(/trailer/) or scanner.match?(/startxref/)
 
-                if stream.scan(@@regexp_obj).nil?
-                  raise InvalidObjectError,
-                    "Object shall begin with '%d %d obj' statement"
+                if scanner.scan(@@regexp_obj).nil?
+                    raise InvalidObjectError, "Object shall begin with '%d %d obj' statement"
                 end
 
-                no = stream['no'].to_i
-                gen = stream['gen'].to_i
+                no = scanner['no'].to_i
+                gen = scanner['gen'].to_i
 
-                type = typeof(stream)
+                type = typeof(scanner)
                 if type.nil?
-                    raise InvalidObjectError,
-                            "Cannot determine object (no:#{no},gen:#{gen}) type"
+                    raise InvalidObjectError, "Cannot determine object (no:#{no},gen:#{gen}) type"
                 end
 
                 begin
-                    new_obj = type.parse(stream, parser)
+                    new_obj = type.parse(scanner, parser)
                 rescue
-                    raise InvalidObjectError,
-                            "Failed to parse object (no:#{no},gen:#{gen})\n\t -> [#{$!.class}] #{$!.message}"
+                    raise InvalidObjectError, "Failed to parse object (no:#{no},gen:#{gen})\n\t -> [#{$!.class}] #{$!.message}"
                 end
 
                 new_obj.set_indirect(true)
@@ -634,17 +652,17 @@ module Origami
                 new_obj.generation = gen
                 new_obj.file_offset = offset
 
-                if stream.skip(@@regexp_endobj).nil?
+                if scanner.skip(@@regexp_endobj).nil?
                     raise UnterminatedObjectError.new("Object shall end with 'endobj' statement", new_obj)
                 end
 
                 new_obj
             end
 
-            def skip_until_next_obj(stream) #:nodoc:
+            def skip_until_next_obj(scanner) #:nodoc:
                 [ @@regexp_obj, /xref/, /trailer/, /startxref/ ].each do |re|
-                    if stream.scan_until(re)
-                        stream.pos -= stream.matched_size
+                    if scanner.scan_until(re)
+                        scanner.pos -= scanner.matched_size
                         return true
                     end
                 end
@@ -654,7 +672,7 @@ module Origami
         end
 
         def version_required #:nodoc:
-            [ 1.0, 0 ]
+            [ '1.0', 0 ]
         end
 
         #
@@ -666,28 +684,77 @@ module Origami
             name.split("::").last.to_sym
         end
 
-        def cast_to(type, _parser = nil) #:nodoc:
-            if type.native_type != self.native_type
-                raise TypeError, "Incompatible cast from #{self.class} to #{type}"
-            end
-
-            self
-        end
-
         #
         # Outputs this object into PDF code.
         # _data_:: The object data.
         #
-        def to_s(data)
+        def to_s(data, eol: $/)
             content = ""
-            content << "#{no} #{generation} #{TOKENS.first}" << EOL if self.indirect?
+            content << "#{no} #{generation} #{TOKENS.first}" << eol if indirect? and numbered?
             content << data
-            content << EOL << TOKENS.last << EOL if self.indirect?
+            content << eol << TOKENS.last << eol if indirect? and numbered?
 
             content.force_encoding('binary')
         end
-
         alias output to_s
+
+        private
+
+        #
+        # Raises a TypeError exception if the current object is not castable to the provided type.
+        #
+        def assert_cast_type(type) #:nodoc:
+            if type.native_type != self.native_type
+                raise TypeError, "Incompatible cast from #{self.class} to #{type}"
+            end
+        end
+
+        #
+        # Copy the attributes of the current object to another object.
+        # Copied attributes do not include the file offset.
+        #
+        def transfer_attributes(target)
+            target.no, target.generation = @no, @generation
+            target.parent = @parent
+            if self.indirect?
+                target.set_indirect(true)
+                target.set_document(@document)
+            end
+
+            target
+        end
+
+        #
+        # Replace all references of an object by their actual object value.
+        #
+        def resolve_all_references(obj, browsed: [], cache: {})
+            return obj if browsed.include?(obj)
+            browsed.push(obj)
+
+            if obj.is_a?(ObjectStream)
+                obj.each do |subobj|
+                    resolve_all_references(subobj, browsed: browsed, cache: cache)
+                end
+            end
+
+            if obj.is_a?(Stream)
+                resolve_all_references(obj.dictionary, browsed: browsed, cache: cache)
+            end
+
+            if obj.is_a?(CompoundObject)
+                obj.update_values! do |subobj|
+                    if subobj.is_a?(Reference)
+                        subobj = (cache[subobj] ||= subobj.solve.copy)
+                        subobj.no = subobj.generation = 0
+                        subobj.parent = obj
+                    end
+
+                    resolve_all_references(subobj, browsed: browsed, cache: cache)
+                end
+            end
+
+            obj
+        end
     end
 
 end

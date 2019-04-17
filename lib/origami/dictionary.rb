@@ -28,18 +28,14 @@ module Origami
     # Dictionaries are containers associating a Name to an embedded Object.
     #
     class Dictionary < Hash
-        include Origami::Object
+        include CompoundObject
         include FieldAccessor
         using TypeConversion
+        extend TypeGuessing
 
         TOKENS = %w{ << >> } #:nodoc:
         @@regexp_open = Regexp.new(WHITESPACES + TOKENS.first + WHITESPACES)
         @@regexp_close = Regexp.new(WHITESPACES + TOKENS.last + WHITESPACES)
-
-        @@type_signatures = {}
-        @@type_keys = []
-
-        attr_reader :strings_cache, :names_cache, :xref_cache
 
         #
         # Creates a new Dictionary.
@@ -48,10 +44,6 @@ module Origami
         def initialize(hash = {}, parser = nil)
             raise TypeError, "Expected type Hash, received #{hash.class}." unless hash.is_a?(Hash)
             super()
-
-            @strings_cache = []
-            @names_cache = []
-            @xref_cache = {}
 
             hash.each_pair do |k,v|
                 next if k.nil?
@@ -73,33 +65,30 @@ module Origami
                     end
                 end
 
-                # Cache keys and values for fast search.
-                cache_key(key)
-                cache_value(value)
-
                 self[key] = value
             end
         end
 
         def self.parse(stream, parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
-            if stream.skip(@@regexp_open).nil?
+            if scanner.skip(@@regexp_open).nil?
                 raise InvalidDictionaryObjectError, "No token '#{TOKENS.first}' found"
             end
 
             hash = {}
-            while stream.skip(@@regexp_close).nil? do
-                key = Name.parse(stream, parser)
+            while scanner.skip(@@regexp_close).nil? do
+                key = Name.parse(scanner, parser)
 
-                type = Object.typeof(stream)
+                type = Object.typeof(scanner)
                 raise InvalidDictionaryObjectError, "Invalid object for field #{key}" if type.nil?
 
-                value = type.parse(stream, parser)
+                value = type.parse(scanner, parser)
                 hash[key] = value
             end
 
-            if Origami::OPTIONS[:enable_type_guessing] and not (@@type_keys & hash.keys).empty?
+            if Origami::OPTIONS[:enable_type_guessing]
                 dict_type = self.guess_type(hash)
             else
                 dict_type = self
@@ -112,157 +101,83 @@ module Origami
             dict
         end
 
-        def to_s(indent: 1, tab: "\t") #:nodoc:
-            if indent > 0
-                content = TOKENS.first + EOL
-                self.each_pair do |key,value|
-                    content << tab * indent << key.to_s << ' '
-                    content << (value.is_a?(Dictionary) ? value.to_s(indent: indent+1) : value.to_s)
-                    content << EOL
+        def to_s(indent: 1, tab: "\t", eol: $/) #:nodoc:
+            nl = eol
+            tab, nl = '', '' if indent == 0
+
+            content = TOKENS.first + nl
+            self.each_pair do |key,value|
+                content << "#{tab * indent}#{key} "
+
+                content <<
+                if value.is_a?(Dictionary)
+                    value.to_s(eol: eol, indent: (indent == 0) ? 0 : indent + 1)
+                else
+                    value.to_s(eol: eol)
                 end
 
-                content << tab * (indent - 1) << TOKENS.last
-            else
-                content = TOKENS.first.dup
-                self.each_pair do |key,value|
-                    content << "#{key} #{value.is_a?(Dictionary) ? value.to_s(indent: 0) : value.to_s}"
-                end
-                content << TOKENS.last
+                content << nl
             end
 
-            super(content)
+            content << tab * (indent - 1) if indent > 0
+            content << TOKENS.last
+
+            super(content, eol: eol)
         end
 
-        def map!(&b)
-            self.each_pair do |k,v|
-                self[k] = b.call(v)
+        #
+        # Returns a new Dictionary object with values modified by given block.
+        #
+        def transform_values(&b)
+            self.class.new self.map { |k, v|
+                [ k.to_sym, b.call(v) ]
+            }.to_h
+        end
+
+        #
+        # Modifies the values of the Dictionary, leaving keys unchanged.
+        #
+        def transform_values!(&b)
+            self.each_pair do |k, v|
+                self[k] = b.call(unlink_object(v))
             end
         end
 
+        #
+        # Merges the content of the Dictionary with another Dictionary.
+        #
         def merge(dict)
-            Dictionary.new(super(dict))
+            self.class.new(super(dict))
         end
 
         def []=(key,val)
             unless key.is_a?(Symbol) or key.is_a?(Name)
-                fail "Expecting a Name for a Dictionary entry, found #{key.class} instead."
+                raise TypeError, "Expecting a Name for a Dictionary entry, found #{key.class} instead."
             end
 
-            key = key.to_o
             if val.nil?
-                delete(key)
+                self.delete(key)
                 return
             end
 
-            val = val.to_o
-            super(key,val)
-
-            key.parent = self
-            val.parent = self unless val.indirect? or val.parent.equal?(self)
+            super(link_object(key), link_object(val))
         end
 
         def [](key)
             super(key.to_o)
         end
 
-        def key?(key)
-            super(key.to_o)
-        end
-        alias include? key?
+        alias key? include?
         alias has_key? key?
-
-        def delete(key)
-            super(key.to_o)
-        end
-
-        def cast_to(type, parser = nil)
-            super(type)
-
-            cast = type.new(self.copy, parser)
-            cast.parent = self.parent
-            cast.no, cast.generation = self.no, self.generation
-            if self.indirect?
-                cast.set_indirect(true)
-                cast.set_document(self.document)
-                cast.file_offset = self.file_offset # cast can replace self
-            end
-
-            cast
-        end
-
-        alias each each_value
 
         def to_h
             Hash[self.to_a.map!{|k, v| [ k.value, v.value ]}]
         end
         alias value to_h
 
-        def copy
-            copy = self.class.new
-            self.each_pair do |k,v|
-                copy[k] = v.copy
-            end
-
-            copy.parent = @parent
-            copy.no, copy.generation = @no, @generation
-            copy.set_indirect(true) if self.indirect?
-            copy.set_document(@document) if self.indirect?
-
-            copy
-        end
-
-        def self.add_type_signature(key, value) #:nodoc:
-            key, value = key.to_o, value.to_o
-
-            # Inherit the superclass type information.
-            if not @@type_signatures.key?(self) and @@type_signatures.key?(self.superclass)
-                @@type_signatures[self] = @@type_signatures[self.superclass].dup
-            end
-
-            @@type_signatures[self] ||= {}
-            @@type_signatures[self][key] = value
-
-            @@type_keys.push(key) unless @@type_keys.include?(key)
-        end
-
-        def self.guess_type(hash) #:nodoc:
-            best_type = self
-
-            @@type_signatures.each_pair do |klass, keys|
-                next unless klass < best_type
-
-                best_type = klass if keys.all? { |k,v| hash[k] == v }
-            end
-
-            best_type
-        end
-
         def self.hint_type(_name); nil end #:nodoc:
 
         private
-
-        def cache_key(key)
-            @names_cache.push(key)
-        end
-
-        def cache_value(value)
-            case value
-            when String then @strings_cache.push(value)
-            when Name then @names_cache.push(value)
-            when Reference then
-                (@xref_cache[value] ||= []).push(self)
-            when Dictionary, Array
-                @strings_cache.concat(value.strings_cache)
-                @names_cache.concat(value.names_cache)
-                @xref_cache.update(value.xref_cache) do |_ref, cache1, cache2|
-                    cache1.concat(cache2)
-                end
-
-                value.strings_cache.clear
-                value.names_cache.clear
-                value.xref_cache.clear
-            end
-        end
 
         def guess_value_type(key, value)
             hint_type = self.class.hint_type(key.value)

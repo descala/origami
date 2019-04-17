@@ -40,7 +40,7 @@ module Origami
                 attr_setter = "attr_#{name}="
                 remove_method(attr_setter) rescue NameError
                 define_method(attr_setter) do |value|
-                    self.attributes[names.to_s] = value
+                    self.attributes[name.to_s] = value
                 end
             end
 
@@ -72,7 +72,75 @@ module Origami
 
         class Element < REXML::Element
             include XFA
+
+            #
+            # A permission flag for allowing or blocking attempted changes to the element.
+            # 0 - Allow changes to properties and content.
+            # 1 - Block changes to properties and content.
+            #
+            module Lockable
+                def lock!
+                    self.attr_lock = 1
+                end
+
+                def unlock!
+                    self.attr_lock = 0
+                end
+
+                def locked?
+                    self.attr_lock == 1
+                end
+
+                def self.included(receiver)
+                    receiver.xfa_attribute "lock"
+                end
+            end
+
+            #
+            # An attribute to hold human-readable metadata.
+            #
+            module Descriptive
+                def self.included(receiver)
+                    receiver.xfa_attribute "desc"
+                end
+            end
+
+            #
+            # A unique identifier that may be used to identify this element as a target.
+            #
+            module Referencable
+                def self.included?(receiver)
+                    receiver.xfa_attribute "id"
+                end
+            end
+
+            #
+            # At template load time, invokes another object in the same document as a prototype for this object.
+            #
+            module Prototypable
+                def self.included?(receiver)
+                    receiver.xfa_attribute "use"
+                    receiver.xfa_attribute "usehref"
+                end
+            end
+
+            #
+            # An identifier that may be used to identify this element in script expressions.
+            #
+            module Namable
+                def self.included?(receiver)
+                    receiver.xfa_attribute "name"
+                end
+            end
+        end
+
+        class TemplateElement < Element
+            include Referencable
+            include Prototypable
+        end
+
+        class NamedTemplateElement < TemplateElement
+            include Namable
         end
     end
-
 end

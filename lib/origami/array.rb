@@ -29,14 +29,12 @@ module Origami
     # Arrays contain a set of Object.
     #
     class Array < ::Array
-        include Origami::Object
+        include CompoundObject
         using TypeConversion
 
         TOKENS = %w{ [ ] } #:nodoc:
         @@regexp_open = Regexp.new(WHITESPACES + Regexp.escape(TOKENS.first) + WHITESPACES)
         @@regexp_close = Regexp.new(WHITESPACES + Regexp.escape(TOKENS.last) + WHITESPACES)
-
-        attr_reader :strings_cache, :names_cache, :xref_cache
 
         #
         # Creates a new PDF Array Object.
@@ -45,10 +43,6 @@ module Origami
         def initialize(data = [], parser = nil, hint_type: nil)
             raise TypeError, "Expected type Array, received #{data.class}." unless data.is_a?(::Array)
             super()
-
-            @strings_cache = []
-            @names_cache = []
-            @xref_cache = {}
 
             data.each_with_index do |value, index|
                 value = value.to_o
@@ -70,32 +64,30 @@ module Origami
                     end
                 end
 
-                # Cache object value for fast search.
-                cache_value(value)
-
                 self.push(value)
             end
         end
 
         def pre_build
-            self.map!{|obj| obj.to_o}
+            self.map!(&:to_o)
 
             super
         end
 
         def self.parse(stream, parser = nil, hint_type: nil) #:nodoc:
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
             data = []
-            offset = stream.pos
 
-            if not stream.skip(@@regexp_open)
+            if not scanner.skip(@@regexp_open)
                 raise InvalidArrayObjectError, "No token '#{TOKENS.first}' found"
             end
 
-            while stream.skip(@@regexp_close).nil? do
-                type = Object.typeof(stream)
+            while scanner.skip(@@regexp_close).nil? do
+                type = Object.typeof(scanner)
                 raise InvalidArrayObjectError, "Bad embedded object format" if type.nil?
 
-                value = type.parse(stream, parser)
+                value = type.parse(scanner, parser)
                 data << value
             end
 
@@ -113,21 +105,23 @@ module Origami
         end
         alias value to_a
 
-        def to_s #:nodoc:
-            content = "#{TOKENS.first} "
-            self.each do |entry|
+        alias each_value each
+
+        def to_s(eol: $/) #:nodoc:
+            content = TOKENS.first.dup
+            content << self.map {|entry|
                 entry = entry.to_o
 
                 case entry
                 when Dictionary # Do not indent dictionaries inside of arrays.
-                    content << entry.to_s(indent: 0) << ' '
+                    entry.to_s(indent: 0, eol: eol)
                 else
-                    content << entry.to_s << ' '
+                    entry.to_s(eol: eol)
                 end
-            end
+            }.join(' ')
             content << TOKENS.last
 
-            super(content)
+            super(content, eol: eol)
         end
 
         def +(other)
@@ -138,57 +132,27 @@ module Origami
         end
 
         def <<(item)
-            obj = item.to_o
-            obj.parent = self unless obj.indirect?
-
-            super(obj)
+            super link_object(item)
         end
-        alias push <<
 
-        def []=(key, val)
-            key, val = key.to_o, val.to_o
-            super(key.to_o, val.to_o)
+        def push(*items)
+            items.each {|item| self << item }
+        end
 
-            val.parent = self unless val.indirect?
+        def []=(index, item)
+            super(index, link_object(item))
+        end
+
+        def insert(index, *items)
+            items.reverse_each do |item|
+                super(index, link_object(item))
+            end
+
+            self
         end
 
         def concat(*arys)
-            arys.each do |ary|
-                ary.each do |e|
-                    val = e.to_o
-                    val.parent = self unless val.indirect?
-
-                    self.push(val)
-                end
-            end
-        end
-
-        def copy
-            copy = self.class.new
-            self.each do |obj|
-                copy << obj.copy
-            end
-
-            copy.parent = @parent
-            copy.no, copy.generation = @no, @generation
-            copy.set_indirect(true) if self.indirect?
-            copy.set_document(@document) if self.indirect?
-            copy
-        end
-
-        def cast_to(type, parser = nil)
-            super(type)
-
-            cast = type.new(self.copy, parser)
-            cast.parent = self.parent
-            cast.no, cast.generation = self.no, self.generation
-            if self.indirect?
-                cast.set_indirect(true)
-                cast.set_document(self.document)
-                cast.file_offset = self.file_offset # cast can replace self
-            end
-
-            cast
+            self.push(*arys.flatten)
         end
 
         #
@@ -243,27 +207,6 @@ module Origami
                 end
             end
         end
-
-        private
-
-        def cache_value(value)
-            case value
-            when String then @strings_cache.push(value)
-            when Name then @names_cache.push(value)
-            when Reference then
-                (@xref_cache[value] ||= []).push(self)
-            when Dictionary, Array
-                @strings_cache.concat(value.strings_cache)
-                @names_cache.concat(value.names_cache)
-                @xref_cache.update(value.xref_cache) do |_ref, cache1, cache2|
-                    cache1.concat(cache2)
-                end
-
-                value.strings_cache.clear
-                value.names_cache.clear
-                value.xref_cache.clear
-            end
-        end
     end
 
     #
@@ -289,6 +232,14 @@ module Origami
             end
 
             Rectangle.new(corners)
+        end
+
+        def width
+            self[2] - self[0]
+        end
+
+        def height
+            self[3] - self[1]
         end
     end
 

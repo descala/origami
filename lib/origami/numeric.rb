@@ -32,59 +32,55 @@ module Origami
         include Origami::Object
 
         def ~
-            self.class.new(~self.to_i)
+            self.class.new(~self.value)
         end
 
         def |(val)
-            self.class.new(self.to_i | val)
+            self.class.new(self.value | val)
         end
 
         def &(val)
-            self.class.new(self.to_i & val)
+            self.class.new(self.value & val)
         end
 
         def ^(val)
-            self.class.new(self.to_i ^ val)
+            self.class.new(self.value ^ val)
         end
 
         def <<(val)
-            self.class.new(self.to_i << val)
+            self.class.new(self.value << val)
         end
 
         def >>(val)
-            self.class.new(self.to_i >> val)
+            self.class.new(self.value >> val)
         end
 
         def +(val)
-            self.class.new(self.to_i + val)
+            self.class.new(self.value + val)
         end
 
         def -(val)
-            self.class.new(self.to_i - val)
+            self.class.new(self.value - val)
         end
 
         def -@
-            self.class.new(-self.to_i)
+            self.class.new(-self.value)
         end
 
         def *(val)
-            self.class.new(self.to_i * val)
+            self.class.new(self.value * val)
         end
 
         def /(val)
-            self.class.new(self.to_i / val)
+            self.class.new(self.value / val)
         end
 
         def abs
-            self.class.new(self.to_i.abs)
+            self.class.new(self.value.abs)
         end
 
         def **(val)
-            self.class.new(self.to_i ** val)
-        end
-
-        def to_s
-            super(value.to_s)
+            self.class.new(self.value ** val)
         end
     end
 
@@ -112,17 +108,22 @@ module Origami
         end
 
         def self.parse(stream, _parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
-            if not stream.scan(@@regexp)
+            if not scanner.scan(@@regexp)
                 raise InvalidIntegerObjectError, "Invalid integer format"
             end
 
-            value = stream['int'].to_i
+            value = scanner['int'].to_i
             int = Integer.new(value)
             int.file_offset = offset
 
             int
+        end
+
+        def to_s(eol: $/) #:nodoc:
+            super(self.value.to_s, eol: eol)
         end
 
         alias value to_i
@@ -156,13 +157,14 @@ module Origami
         end
 
         def self.parse(stream, _parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
-            if not stream.scan(@@regexp)
+            if not scanner.scan(@@regexp)
                 raise InvalidRealObjectError, "Invalid real number format"
             end
 
-            value = stream['real'].to_f
+            value = scanner['real'].to_f
             real = Real.new(value)
             real.file_offset = offset
 
@@ -171,8 +173,8 @@ module Origami
 
         alias value to_f
 
-        def to_s
-            sprintf("%f", self).sub(/\.0*$|(\.\d*[^0])0*$/, '\1')
+        def to_s(eol: $/) #:nodoc:
+            super(sprintf("%f", self).sub(/\.0*$|(\.\d*[^0])0*$/, '\1'), eol: eol)
         end
     end
 

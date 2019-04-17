@@ -47,18 +47,19 @@ module Origami
             @value = (value == true)
         end
 
-        def to_s #:nodoc:
-            super(@value.to_s)
+        def to_s(eol: $/) #:nodoc:
+            super(@value.to_s, eol: eol)
         end
 
         def self.parse(stream, _parser = nil) #:nodoc:
-            offset = stream.pos
+            scanner = Parser.init_scanner(stream)
+            offset = scanner.pos
 
-            if stream.scan(@@regexp).nil?
+            if scanner.scan(@@regexp).nil?
                 raise InvalidBooleanObjectError
             end
 
-            value = (stream['value'] == "true")
+            value = (scanner['value'] == "true")
 
             bool = Boolean.new(value)
             bool.file_offset = offset

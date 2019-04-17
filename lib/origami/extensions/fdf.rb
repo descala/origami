@@ -59,20 +59,22 @@ module Origami
             end
 
             def self.parse(stream) #:nodoc:
-                if not stream.scan(MAGIC).nil?
-                    maj = stream['major'].to_i
-                    min = stream['minor'].to_i
+                scanner = Parser.init_scanner(stream)
+
+                if not scanner.scan(MAGIC).nil?
+                    maj = scanner['major'].to_i
+                    min = scanner['minor'].to_i
                 else
                     raise InvalidHeader, "Invalid header format"
                 end
 
-                stream.skip(REGEXP_WHITESPACES)
+                scanner.skip(REGEXP_WHITESPACES)
 
                 FDF::Header.new(maj, min)
             end
 
-            def to_s
-                "%FDF-#{@major_version}.#{@minor_version}".b + EOL
+            def to_s(eol: $/)
+                "%FDF-#{@major_version}.#{@minor_version}".b + eol
             end
 
             def to_sym #:nodoc:
